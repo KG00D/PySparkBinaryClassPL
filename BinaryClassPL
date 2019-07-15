@@ -1,0 +1,136 @@
+from __future__ import division
+import __builtin__
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import max as max_
+from pyspark.sql.functions import min as min_
+from pyspark.sql.functions import udf, col, when, lit, broadcast, date_format, regexp_replace, first, create_map, concat
+from pyspark.sql import functions as f 
+from pyspark.sql.functions import mean
+from pyspark.sql.types import FloatType, StringType, IntegerType, LongType
+from pyspark import SparkConf, SparkContext, sql
+from pyspark.ml.feature import OneHotEncoderEstimator, StringIndexer, VectorAssembler
+from pyspark.ml.classification import LogisticRegression
+from pyspark.ml.classification import GBTClassifier
+import datetime
+from datetime import date
+from pyspark.sql import HiveContext
+from pyspark.ml import Pipeline
+import sys
+from matchingfunctions import *
+from pyspark.ml.classification import MultilayerPerceptronClassifier
+from pyspark.ml.evaluation import BinaryClassificationEvaluator
+from pyspark.mllib.evaluation import BinaryClassificationMetrics
+from pyspark.mllib.classification import LogisticRegressionWithLBFGS
+from pyspark.mllib.regression import LabeledPoint
+from pyspark.ml.tuning import ParamGridBuilder, CrossValidator
+
+def count_nulls(c):
+    """Input pyspark dataframe and return list of columns with missing value and it's total value"""
+    null_counts = []          #make an empty list to hold our results
+    for col in c.dtypes:     #iterate through the column data types we saw above, e.g. ('C0', 'bigint')
+        cname = col[0]        #splits out the column name, e.g. 'C0'
+        ctype = col[1]        #splits out the column type, e.g. 'bigint'
+        nulls = c.where( c[cname].isNull()).count() #check count of null in column name
+        result = tuple([cname, nulls])  #new tuple, (column name, null count)
+        null_counts.append(result)      #put the new tuple in our result list
+    null_counts=[(x,y) for (x,y) in null_counts if y!=0]  #view just columns that have missing values
+    return null_counts
+
+ratio = 0.70
+def weight_balance(labels):
+    return when(labels == 1, ratio).otherwise(1*(1-ratio))
+
+def main():
+
+    appName = "FileApp"
+    conf = SparkConf().setAppName(appName)
+    sc = SparkContext(conf=conf)
+    hive_context = HiveContext(sc)
+    spark = (sql.SparkSession.builder \
+                .appName(appName)
+                .getOrCreate())
+    wb = udf(weight_balance, FloatType())    
+  
+
+    DF = spark.read.format("com.databricks.spark.avro") \
+        .option("inferSchema", "true") \
+        .load("s3:/folder/part-m-00000.avro")    
+    DF = DF.withColumn("label", DF["label"].cast(IntegerType()))    
+   
+    null_counts = count_nulls(DF)
+    print(null_counts)
+        
+    list_cols_miss=[x[0] for x in null_counts]
+    print(list_cols_miss)
+
+    df_miss= df_final.select(*list_cols_miss)
+    df_miss.dtypes
+
+    catagoricalColumns_miss=[item[0] for item in df_miss.dtypes if item[1].startswith('string')]  
+    print("catcolums_miss:", catcolums_miss)
+
+  
+    numericCols_miss = [item[0] for item in DF.dtypes if  item[1].startswith('bigint') \
+                                                      | item[1].startswith('int') \
+                                                      | item[1].startswith('double') \
+                                                      | item[1].startswith('float')]
+    print("numcolumns_miss:", numcolumns_miss)
+
+    df_Nomiss=df_final.na.drop()
+    
+
+    for x in catcolums_miss:
+        mode=df_Nomiss.groupBy(x).count().sort(col("count").desc()).collect()[0][0]
+        print(x, mode)  
+        DF = DF.na.fill({x:mode}) 
+
+    for i in numcolumns_miss:
+        meanvalue = df_final.select(round(mean(i))).collect()[0][0] 
+        print(i, meanvalue) 
+        DF=DF.na.fill({i:meanvalue})
+    
+    null_counts = count_nulls(df_final)
+    null_counts
+    
+    cols = DF.schema.names
+    stages = []
+    
+    for categoricalCol in categoricalColumns:
+        stringIndexer = StringIndexer(inputCol = categoricalCol, outputCol = categoricalCol + 'Index')
+        encoder = OneHotEncoderEstimator(inputCols=[stringIndexer.getOutputCol()], outputCols=[categoricalCol + "classVec"])
+        stages += [stringIndexer, encoder]
+    
+    label_stringIdx = StringIndexer(inputCol = 'offered', outputCol = 'label')
+    stages += [label_stringIdx]
+    assemblerInputs = [c + "classVec" for c in categoricalColumns] + numericCols
+
+    assembler = VectorAssembler(inputCols=assemblerInputs, outputCol="features", handleInvalid = "skip")
+    stages += [assembler]
+   
+
+    lr = LogisticRegression(featuresCol = 'features', labelCol='label')
+
+    pipeline = Pipeline(stages = stages)
+    pipelineModel = pipeline.fit(DF)
+    DF = pipelineModel.transform(DF)
+    selectedCols = ['label', 'features'] + cols
+    DF = DF.select(selectedCols)
+    DF.printSchema()
+    DFX.printSchema()
+    trainingData, testData = DF.randomSplit([0.7, 0.3], seed = 100)
+    fittedLRModel = pipeline.fit(trainingData)
+    
+    predictionsDF = fittedLRModel.transform(testData)
+    selectedcols = ["label", "features"] + cols
+    predictionsDF = predictionsDF.select(selectedcols)
+
+
+    predictionsDF.select('label', 'id', 'rawPrediction', 'prediction', 'probability').show(25)
+    evaluator = BinaryClassificationEvaluator()
+    ROC = evaluator.evaluate(predictions)
+    print "\n\n\n\n TEST AREA UNDER ROC:%s\n\n\n\n" %ROC
+
+if __name__=="__main__":
+    main()
+
+
